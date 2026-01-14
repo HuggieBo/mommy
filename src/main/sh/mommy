@@ -394,12 +394,24 @@ done
 #endregion
 
 
-#region Parse state
+#region Parse user state
 state_dir="${XDG_STATE_HOME:-"$HOME/.local/state"}/mommy/"
 
 # Toggle output. 0 = state file exists = no output. 1 = state file does not exist = regular output
 state_toggle_path="$state_dir/toggle"
 test -f "$state_toggle_path"; state_toggle="$?"
+#endregion
+
+
+#region Parse Process state
+
+# Toggle Encouragements. If the second last ran command failed but on this command did not,
+# then we want to reward the user.
+#   0 = state file exists = the second last command was not a success.
+#   1 = the state file does not exist = the second last command a success.
+state_process_path="$state_dir/pid_$PPID"
+test -f "$state_process_path"; state_failed_before="$?"
+
 #endregion
 
 
@@ -464,8 +476,16 @@ else
     list_normalize "$MOMMY_IGNORED_STATUSES"; ignored_statuses="$list_normalize__out"
     if list_any_equals "$command_exit_code" "$ignored_statuses"; then exit "$command_exit_code"; fi
 
+    # Create or Delete stated_failed_before file if nessesary
+    if [ 0 -eq "$command_exit_code" ] && [ "0" -eq "$state_failed_before" ]; then
+        if ! rm -- "$state_process_path"; then die "mommy could not delete the process state file~"; fi
+    elif [ 0 -ne "$command_exit_code" ]; then
+        if ! mkdir -p -- "$state_dir"; then die "mommy could not create the state directory~"; fi
+        if ! touch -- "$state_process_path"; then die "mommy could not create the process state file~"; fi
+    fi
+
     # Populate list of templates
-    if [ 0 -eq "$command_exit_code" ] && [ 1 -eq "$MOMMY_COMPLIMENTS_ENABLED" ]; then
+    if [ 0 -eq "$command_exit_code" ] && ([ 1 -eq "$MOMMY_COMPLIMENTS_ENABLED" ] || [ "0" -eq "$state_failed_before" ]); then
         templates="$MOMMY_COMPLIMENTS$n$MOMMY_COMPLIMENTS_EXTRA"
     elif [ 0 -ne "$command_exit_code" ] && [ 1 -eq "$MOMMY_ENCOURAGEMENTS_ENABLED" ]; then
         templates="$MOMMY_ENCOURAGEMENTS$n$MOMMY_ENCOURAGEMENTS_EXTRA"
