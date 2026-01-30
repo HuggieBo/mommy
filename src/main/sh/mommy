@@ -411,6 +411,8 @@ test -f "$state_toggle_path"; state_toggle="$?"
 # then we want to reward the user.
 #   1 = state file exists = the second last command was not a success.
 #   0 = the state file does not exist = the second last command a success.
+
+# Determine the Path for the Temporary Directory
 if [ -n "$XDG_RUNTIME_DIR" ]; then
     tmp_path="$XDG_RUNTIME_DIR/mommy/"
 elif [ -n "$TMPDIR" ]; then
@@ -425,12 +427,14 @@ else
     die "mommy couldn't locate a suitable temporary directory~"
 fi
 
+# clean up files older than a week
 if [ -d "$tmp_path" ]; then
     find "$tmp_path" -type f -mtime +7 -exec rm -f {} \;
 fi
 
 state_process_path="$tmp_path/pid_$PPID"
 ! test -f "$state_process_path"; state_failed_before="$?"
+
 if [ "1" -eq "$MOMMY_REWARDS_ENABLED" ] && [ "1" -eq "$state_failed_before" ]; then
     reward_user="1"
 else
@@ -504,7 +508,7 @@ else
     if [ 0 -eq "$command_exit_code" ] && [ "1" -eq "$state_failed_before" ]; then
         if ! rm -- "$state_process_path"; then die "mommy could not delete the process state file~"; fi
     elif [ 0 -ne "$command_exit_code" ]; then
-        if ! mkdir -p -- "$tmp_path"; then die "mommy could not create the state directory~"; fi
+        if ! mkdir -p -- "$tmp_path"; then die "mommy could not create the temporary directory $tmp_path ~"; fi
         if ! touch -- "$state_process_path"; then die "mommy could not create the process state file~"; fi
     fi
 
