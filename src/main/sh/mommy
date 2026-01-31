@@ -380,7 +380,7 @@ shift "$((OPTIND - 1))"
 #region Load configuration files
 # Global
 config_dir=""
-while [ "x$opt_global_config_dirs" != "x$config_dir" ] ;do
+while [ "x$opt_global_config_dirs" != "x$config_dir" ]; do
     config_dir="${opt_global_config_dirs%%:*}"
     opt_global_config_dirs="${opt_global_config_dirs#"$config_dir":}"
 
@@ -396,7 +396,7 @@ done
 #endregion
 
 
-#region Parse user state
+#region Parse user state (persists across reboot)
 state_dir="${XDG_STATE_HOME:-"$HOME/.local/state"}/mommy/"
 
 # Toggle output. 0 = state file exists = no output. 1 = state file does not exist = regular output
@@ -405,41 +405,28 @@ test -f "$state_toggle_path"; state_toggle="$?"
 #endregion
 
 
-#region Parse Process state
+#region Parse runtime state (does not persist across reboot)
+runtime_state_dirs="$XDG_RUNTIME_DIR:/run:/var/run:$TMPDIR"
+runtime_state_dir=""
+while [ "x$runtime_state_dirs" != "x$runtime_state_dir" ]; do
+    runtime_state_dir="${runtime_state_dirs%%:*}"
+    runtime_state_dirs="${runtime_state_dirs#"$runtime_state_dir":}"
 
-# Toggle Rewards. If the second last ran command failed but on this command did not,
-# then we want to reward the user.
-#   1 = state file exists = the second last command was not a success.
-#   0 = the state file does not exist = the second last command a success.
+    if [ -n "$runtime_state_dir" ] && [ -d "$runtime_state_dir" ]; then
+        break
+    fi
+done
+runtime_state_dir="$runtime_state_dir/mommy_$LOGNAME"
+if ! mkdir -p -- "$runtime_state_dir"; then die "mommy could not create the runtime state directory~"; fi
 
-# Determine the Path for the Temporary Directory
-if [ -n "$XDG_RUNTIME_DIR" ]; then
-    tmp_path="$XDG_RUNTIME_DIR/mommy/"
-elif [ -n "$TMPDIR" ]; then
-    tmp_path="$TMPDIR/mommy/"
-elif [ -d "/run/" ]; then
-    tmp_path="/run/mommy/"
-elif [ -d "/var/run" ]; then
-    tmp_path="/var/run/mommy/"
-elif [ -d "/tmp/" ]; then
-    tmp_path="/tmp/mommy/"
-else
-    die "mommy couldn't locate a suitable temporary directory~"
-fi
+#region PID status file (file exists = previously error, file does not exist = previously success)
+# Delete PID status files older than 7 weeks
+find "$runtime_state_dir" -type f -name "pid_*" -mtime +7 -exec rm -f {} \;
 
-# clean up files older than a week
-if [ -d "$tmp_path" ]; then
-    find "$tmp_path" -type f -mtime +7 -exec rm -f {} \;
-fi
-
-state_process_path="$tmp_path/pid_$PPID"
-! test -f "$state_process_path"; state_failed_before="$?"
-
-if [ "1" -eq "$MOMMY_REWARDS_ENABLED" ] && [ "1" -eq "$state_failed_before" ]; then
-    reward_user="1"
-else
-    reward_user="0"
-fi
+# Parse PID from file
+previous_pid_file="$runtime_state_dir/pid_$PPID"
+test -f "$previous_pid_file"; previous_pid="$?"
+#endregion
 #endregion
 
 
@@ -468,75 +455,81 @@ if [ "x" != "x$opt_pipefail" ] && [ "x" = "x$opt_eval" ]; then
 fi
 #endregion
 
-#region Toggling and command execution
+#region Run command (if necessary)
+if [ "x" != "x$opt_eval" ]; then
+    if [ "x" != "x$opt_pipefail" ]; then
+        opt_eval="set -o pipefail; $opt_eval"
+    fi
+
+    (eval "$opt_eval")
+    command_exit_code="$?"
+elif [ "x" != "x$opt_status" ]; then
+    command_exit_code="$opt_status"
+else
+    ("$@")
+    command_exit_code="$?"
+fi
+#endregion
+
+#region Update user state
 if [ "x" != "x$opt_toggle" ]; then
-    if [ "0" -eq "$state_toggle" ]; then
+    if [ 0 -eq "$state_toggle" ]; then
         if ! rm -- "$state_toggle_path"; then die "mommy could not delete the state file~"; fi
         printf "mommy has been enabled for this user. mommy will once again display output. to disable mommy again, run 'mommy -t'~\n"
     else
-        if ! mkdir -p -- "$state_path"; then die "mommy could not create the state directory~"; fi
+        if ! mkdir -p -- "$state_dir"; then die "mommy could not create the state directory~"; fi
         if ! touch -- "$state_toggle_path"; then die "mommy could not create the state file~"; fi
         printf "mommy has been disabled for this user. mommy will not print any output until she is enabled again. to enable mommy again, run 'mommy -t'~\n"
     fi
     exit 0
+fi
+#endregion
+
+#region Update runtime state
+if [ 0 -eq "$command_exit_code" ]; then
+    if ! rm -f -- "$previous_pid_file"; then die "mommy could not delete the process state file~"; fi
+elif [ 0 -ne "$command_exit_code" ]; then
+    if ! mkdir -p -- "$runtime_state_dir"; then die "mommy could not create the runtime state directory~"; fi
+    if ! touch -- "$previous_pid_file"; then die "mommy could not create the process state file~"; fi
+fi
+#endregion
+
+#region Premature exits
+# Exit if mommy is toggled off
+if [ 0 -eq "$state_toggle" ]; then
+    exit 0
+fi
+
+# Exit if exit code should be ignored
+list_normalize "$MOMMY_IGNORED_STATUSES"; ignored_statuses="$list_normalize__out"
+if list_any_equals "$command_exit_code" "$ignored_statuses"; then exit "$command_exit_code"; fi
+#endregion
+
+#region Display regular output
+# Populate list of templates
+if [ 0 -eq "$command_exit_code" ] && [ 1 -eq "$MOMMY_COMPLIMENTS_ENABLED" ] && { [ 1 -eq "$MOMMY_REWARDS_ENABLED" ] || [ 1 -eq "$previous_pid" ]; }; then
+    templates="$MOMMY_COMPLIMENTS$n$MOMMY_COMPLIMENTS_EXTRA"
+elif [ 0 -ne "$command_exit_code" ] && [ 1 -eq "$MOMMY_ENCOURAGEMENTS_ENABLED" ]; then
+    templates="$MOMMY_ENCOURAGEMENTS$n$MOMMY_ENCOURAGEMENTS_EXTRA"
 else
-    # Check if output is disabled by toggle
-    if [ "0" -eq "$state_toggle" ]; then
-        exit 0
-    fi
-
-    # Run command
-    if [ "x" != "x$opt_eval" ]; then
-        if [ "x" != "x$opt_pipefail" ]; then
-            opt_eval="set -o pipefail; $opt_eval"
-        fi
-
-        (eval "$opt_eval")
-        command_exit_code="$?"
-    elif [ "x" != "x$opt_status" ]; then
-        command_exit_code="$opt_status"
-    else
-        ("$@")
-        command_exit_code="$?"
-    fi
-
-    # Check if premature exit is desired
-    list_normalize "$MOMMY_IGNORED_STATUSES"; ignored_statuses="$list_normalize__out"
-    if list_any_equals "$command_exit_code" "$ignored_statuses"; then exit "$command_exit_code"; fi
-
-    # Create or Delete stated_failed_before file if nessesary
-    if [ 0 -eq "$command_exit_code" ] && [ "1" -eq "$state_failed_before" ]; then
-        if ! rm -- "$state_process_path"; then die "mommy could not delete the process state file~"; fi
-    elif [ 0 -ne "$command_exit_code" ]; then
-        if ! mkdir -p -- "$tmp_path"; then die "mommy could not create the temporary directory $tmp_path ~"; fi
-        if ! touch -- "$state_process_path"; then die "mommy could not create the process state file~"; fi
-    fi
-
-    # Populate list of templates
-    if [ 0 -eq "$command_exit_code" ] && ([ 1 -eq "$MOMMY_COMPLIMENTS_ENABLED" ] || [ "1" -eq "$reward_user" ]); then
-        templates="$MOMMY_COMPLIMENTS$n$MOMMY_COMPLIMENTS_EXTRA"
-    elif [ 0 -ne "$command_exit_code" ] && [ 1 -eq "$MOMMY_ENCOURAGEMENTS_ENABLED" ]; then
-        templates="$MOMMY_ENCOURAGEMENTS$n$MOMMY_ENCOURAGEMENTS_EXTRA"
-    else
-        exit "$command_exit_code"
-    fi
-
-    # Select and fill template
-    list_normalize "$MOMMY_FORBIDDEN_WORDS"; forbidden_words="$list_normalize__out"
-    list_normal_choose "$templates" "$forbidden_words"; template="$list_choose__out"
-    fill_template "$template" "$MOMMY_CAREGIVER" "$MOMMY_PRONOUNS" "$MOMMY_SWEETIE" "$MOMMY_PREFIX" "$MOMMY_SUFFIX" \
-                  "$MOMMY_CAPITALIZE"; response="$fill_template__out"
-    list_filter_not "$response" "$forbidden_words"; safe_response="$list_filter_not__out"
-
-    # Output template
-    list_normalize "$MOMMY_COLOR"; list_choose "$list_normalize__out"; color="$list_choose__out"
-
-    case "$opt_target" in
-    1) color_print "$color" "$safe_response" >&1 ;;
-    2) color_print "$color" "$safe_response" >&2 ;;
-    esac
-
     exit "$command_exit_code"
 fi
+
+# Select and fill template
+list_normalize "$MOMMY_FORBIDDEN_WORDS"; forbidden_words="$list_normalize__out"
+list_normal_choose "$templates" "$forbidden_words"; template="$list_choose__out"
+fill_template "$template" "$MOMMY_CAREGIVER" "$MOMMY_PRONOUNS" "$MOMMY_SWEETIE" "$MOMMY_PREFIX" "$MOMMY_SUFFIX" \
+              "$MOMMY_CAPITALIZE"; response="$fill_template__out"
+list_filter_not "$response" "$forbidden_words"; safe_response="$list_filter_not__out"
+
+# Output template
+list_normalize "$MOMMY_COLOR"; list_choose "$list_normalize__out"; color="$list_choose__out"
+
+case "$opt_target" in
+1) color_print "$color" "$safe_response" >&1 ;;
+2) color_print "$color" "$safe_response" >&2 ;;
+esac
+
+exit "$command_exit_code"
 #endregion
 #endregion
